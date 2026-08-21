@@ -22,12 +22,30 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg git git-lfs aria2 rclone rsync tmux jq unzip bc \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir uv
+# uv con l'installatore ufficiale, non via pip: e' un binario a se' e non tocca
+# nessun Python, quindi non puo' inciampare in PEP 668 ne' nella pip della base.
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH=/root/.local/bin:$PATH
+
+# ---- ambiente Python nostro, a /opt/ltx --------------------------------
+#      NON si installa nel Python di sistema: Ubuntu 24.04 lo marca
+#      "externally managed" (PEP 668) e rifiuta. E non si usa quello della base
+#      RunPod: non sappiamo dove lo tiene, e vogliamo zero sorprese.
+#      /opt/ltx/bin/python e' gia' il percorso che usano gli script del pod.
+ENV LTXPY=/opt/ltx/bin/python
+RUN uv venv /opt/ltx --python 3.12
+
+# ---- torch: la versione verificata funzionante sul pod -----------------
+#      cu128 gira sia su driver CUDA 12.8 sia 13.0 (la flotta RunPod ha driver misti)
+#      ed e' il minimo per Blackwell (sm_120).
+RUN uv pip install --python $LTXPY --no-cache \
+        torch==2.11.0 torchvision \
+        --index-url https://download.pytorch.org/whl/cu128
 
 # ---- le librerie: il blocco che sul pod costa 35-40 minuti -------------
 #      diffusers da git: LTX-2.5 non e' ancora in una release ufficiale.
 #      transformers>=5 e' obbligatorio: il text encoder e' Gemma4, assente nella 4.x.
-RUN uv pip install --system --no-cache \
+RUN uv pip install --python $LTXPY --no-cache \
         "huggingface_hub[cli,hf_transfer]" \
         "transformers>=5" accelerate safetensors sentencepiece protobuf \
         "diffusers @ git+https://github.com/huggingface/diffusers@main" \
@@ -42,10 +60,10 @@ RUN chmod +x /opt/tlv/*.sh 2>/dev/null || true; mkdir -p /models/hf /workspace/t
 # ---- verifica IN BUILD -------------------------------------------------
 #      Se qualcosa non importa, la compilazione fallisce QUI, gratis su GitHub,
 #      invece che alle tre di notte su un pod da 2 dollari l'ora.
-RUN python -c "import torch, diffusers, transformers; \
+RUN $LTXPY -c "import torch, diffusers, transformers; \
 print('torch', torch.__version__, '| cuda', torch.version.cuda, \
 '| diffusers', diffusers.__version__, '| transformers', transformers.__version__)" \
- && python -c "from diffusers import LTX2Pipeline, LTX2ImageToVideoPipeline, \
+ && $LTXPY -c "from diffusers import LTX2Pipeline, LTX2ImageToVideoPipeline, \
 LTX2LatentUpsamplePipeline, LTX2VideoTransformer3DModel; print('import LTX ok')"
 
 # NIENTE CMD/ENTRYPOINT: si eredita quello di runpod/pytorch (sshd + jupyter).

@@ -1,0 +1,62 @@
+name: costruisci immagine tlv-pod
+
+on:
+  push:
+    branches: [main]
+    paths: ['Dockerfile', 'scripts/**', '.github/workflows/build.yml']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest        # x86_64 nativo: niente emulazione, RunPod e' solo amd64
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      # SEMPRE PER PRIMO: senza, la compilazione muore con "no space left on device".
+      # Il runner ha 14 GB garantiti; questo ne recupera ~31 e ci porta a ~55-60.
+      - name: Libera spazio sul runner
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compila e pubblica
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true              # MAI load:true, raddoppierebbe il disco usato
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/tlv-pod:latest
+            ghcr.io/${{ github.repository_owner }}/tlv-pod:${{ github.sha }}
+          # cache su registry, NON type=gha: la cache di GitHub e' 10 GB e andrebbe
+          # in thrashing su un'immagine di questa taglia. GHCR e' gratis, usiamo quello.
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/tlv-pod:buildcache
+          cache-to:   type=registry,ref=ghcr.io/${{ github.repository_owner }}/tlv-pod:buildcache,mode=max
+          # OBBLIGATORI: senza, buildx pubblica un manifest OCI puro e il daemon di
+          # RunPod rifiuta il pull con "denied: denied" — che sembra un problema di
+          # permessi e non lo e'.
+          provenance: false
+          sbom: false
+
+      - name: Riepilogo
+        run: |
+          echo "### Immagine pronta" >> $GITHUB_STEP_SUMMARY
+          echo '`ghcr.io/${{ github.repository_owner }}/tlv-pod:latest`' >> $GITHUB_STEP_SUMMARY

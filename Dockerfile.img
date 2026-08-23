@@ -1,0 +1,64 @@
+# syntax=docker/dockerfile:1.7
+#
+# Ambiente per generare i KEYFRAME con SenseNova-U1.5-8B-MoT su GPU affittata.
+#
+# PERCHE' UN'IMMAGINE SEPARATA E NON UNA RIGA IN PIU' NEL Dockerfile DEL VIDEO
+# (decisione di Jon, 23/08): SenseNova si porta dietro il PROPRIO ambiente Python,
+# con la propria versione di torch. Infilarlo accanto a /opt/ltx farebbe crescere
+# l'immagine video di 6-8 GB — peso che ogni pod video pagherebbe anche quando le
+# immagini non servono — e metterebbe le mani nell'unica catena che oggi funziona.
+# Cosi' invece: chi genera video usa tlv-pod e non si accorge che questa esiste;
+# chi genera keyframe usa questa e NON scarica i 73 GiB di LTX.
+#
+# Stessa base del video: SSH e JupyterLab gia' configurati, cu128 per Blackwell.
+FROM runpod/pytorch:1.1.0-cu1281-torch291-ubuntu2404
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_ROOT_USER_ACTION=ignore \
+    HF_HOME=/models/hf \
+    HF_HUB_CACHE=/models/hf/hub \
+    HF_HUB_DISABLE_XET=1 \
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ffmpeg git git-lfs aria2 rclone rsync tmux jq unzip bc \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv con l'installatore ufficiale: stesso motivo del Dockerfile video (PEP 668).
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH=/root/.local/bin:$PATH
+
+# ---- SenseNova, nel suo ambiente ---------------------------------------
+#      Il repo si installa con `uv sync`, che si costruisce .venv da solo leggendo
+#      il suo pyproject. Non lo forziamo dentro un venv nostro: se domani cambiano
+#      le loro dipendenze, il comando resta quello della loro documentazione.
+#      --depth 1: del repo ci serve il codice di oggi, non la sua storia.
+ARG SENSENOVA_REF=main
+RUN git clone --depth 1 --branch ${SENSENOVA_REF} \
+        https://github.com/OpenSenseNova/SenseNova-U1.git /opt/sensenova
+WORKDIR /opt/sensenova
+RUN uv sync && rm -rf /root/.cache/uv
+
+ENV SNPY=/opt/sensenova/.venv/bin/python
+
+# hf_transfer: i pesi sono ~20 GB in Q8, e su questi pod la rete va fra 78 e 850 MB/s.
+RUN uv pip install --python $SNPY --no-cache "huggingface_hub[cli,hf_transfer]"
+
+COPY scripts_img/ /opt/tlv/
+RUN chmod +x /opt/tlv/*.sh 2>/dev/null || true; mkdir -p /models/hf /workspace/keyframes
+
+# ---- verifica IN BUILD -------------------------------------------------
+#      Stessa filosofia del Dockerfile video: se qualcosa non importa, la
+#      compilazione fallisce QUI, gratis su GitHub, invece che su un pod a $2/h.
+#      NON si verificano i pesi: quelli si scaricano a runtime e non stanno
+#      nell'immagine (regola della casa: dentro cio' che e' lento da installare,
+#      fuori cio' che e' veloce da scaricare).
+RUN $SNPY -c "import torch, transformers; \
+print('torch', torch.__version__, '| cuda', torch.version.cuda, \
+'| transformers', transformers.__version__)" \
+ && ls /opt/sensenova/examples/t2i/inference.py \
+ && echo 'import ambiente SenseNova ok'
+
+WORKDIR /workspace
+# NIENTE CMD/ENTRYPOINT: si eredita quello di runpod/pytorch (sshd + jupyter).

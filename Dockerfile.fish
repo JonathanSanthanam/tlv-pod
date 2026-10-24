@@ -35,7 +35,12 @@ RUN uv sync --python 3.12 --extra cu128 && rm -rf /root/.cache/uv
 
 # Il guardiano del pod e sul_pod.sh usano /opt/ltx/bin/python: qui e' il Python di fish-speech
 # (ha huggingface_hub per scaricare i pesi). /opt/ltx in questa immagine non esiste altrimenti.
-RUN mkdir -p /opt/ltx/bin && ln -s /opt/fish/.venv/bin/python /opt/ltx/bin/python
+# Un piccolo script e non un link: Python riconosce il suo ambiente dal percorso con cui lo si chiama, e da
+# /opt/ltx/bin/python (link) cercava pyvenv.cfg in /opt/ltx, trovava il Python di sistema e niente transformers
+# (prima costruzione del 24/10, fallita al controllo qui sotto).
+RUN mkdir -p /opt/ltx/bin \
+ && printf '#!/bin/sh\nexec /opt/fish/.venv/bin/python "$@"\n' > /opt/ltx/bin/python \
+ && chmod +x /opt/ltx/bin/python
 
 # ---- verifica IN BUILD: se non importa, fallisce qui, gratis -------------
 RUN /opt/ltx/bin/python -c "import torch, transformers, huggingface_hub, soundfile; \
